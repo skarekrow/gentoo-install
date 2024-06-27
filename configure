@@ -47,7 +47,7 @@ check_wanted_programs dialog ncurses=ncursesw6-config
 
 # Determine whether EFI is available
 HAS_EFI_SUPPORT=$([[ -d /sys/firmware/efi ]] && echo -n "true" || echo -n "false")
-DEFAULT_BOOT_TYPE=$([[ $HAS_EFI_SUPPORT == true ]] && echo -n "efi" || echo -n "bios")
+DEFAULT_BOOT_TYPE=$([[ $HAS_EFI_SUPPORT == true ]] && echo -n "efi")
 EFI_UNSUPPORTED_MESSAGE_SHORT="Missing EFI support on this system!"
 EFI_UNSUPPORTED_MESSAGE="Apparently, your system does NOT support efi. Double-check before proceeding!"
 
@@ -67,7 +67,7 @@ function get_timezone() {
 		timezone=${file#*zoneinfo/}
 		if [[ $timezone == "$file" ]]; then
 			# not pointing to expected location or not Region/City
-			echo "Europe/London"
+			echo "America/Chicago"
 		else
 			echo "$timezone"
 		fi
@@ -80,55 +80,12 @@ function get_timezone() {
 }
 
 function get_default_keymap() {
-	local keymap
-	keymap="$(grep KEYMAP /etc/vconsole.conf 2>/dev/null || echo "KEYMAP=us")"
-	keymap="${keymap#KEYMAP=}"
-
-	local map
-	for map in "${ALL_KEYMAPS[@]}"; do
-		if [[ $map == "$keymap" ]]; then
-			echo -n "${keymap}"
-			return
-		fi
-	done
-
 	# Fallback to us
 	echo -n "us"
 }
 
-function get_all_keymaps() {
-	ALL_KEYMAPS=()
-	local map
-	for map in $(find /usr/share/keymaps/ /usr/share/kbd/keymaps/ -type f -iname '*.map.gz' -printf "%f\n" 2>/dev/null | sort -u); do
-		ALL_KEYMAPS+=("${map%%.map.gz}")
-	done
-}
-
-function get_all_timezones() {
-	readarray -t ALL_TIMEZONES < <(find /usr/share/zoneinfo -type f -printf "%P\n" | sort -u)
-}
-
 function recalculate_locales() {
-	LOCALES=""
-	N_LOCALES=0
-
-	local selected_index_list="$SELECTED_LOCALES"
-	local next_selected
-	next_selected="${selected_index_list%% *}"
-	selected_index_list="${selected_index_list#* }"
-
-	local i=0
-	for item in "${SUPPORTED_LOCALES[@]}"; do
-		if [[ "$i" == "$next_selected" ]]; then
-			LOCALES="$LOCALES"$'\n'"$item"
-			next_selected="${selected_index_list%% *}"
-			selected_index_list="${selected_index_list#* }"
-			((++N_LOCALES))
-		fi
-		((++i))
-	done
-
-	LOCALES="${LOCALES:1}"
+	LOCALES=$'C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nen_US ISO-8859-1'
 }
 
 function define_disk_configuration_function() {
@@ -158,23 +115,8 @@ function define_zfs_compression() {
 function define_disk_layout() {
 	local swapdev
 	case "$PARTITIONING_SCHEME" in
-		"classic_single_disk") define_disk_configuration_function "create_classic_single_disk_layout swap=$(define_swap) type=${PARTITIONING_BOOT_TYPE@Q} luks=${PARTITIONING_USE_LUKS@Q} root_fs=${PARTITIONING_ROOT_FS@Q}" "${PARTITIONING_DEVICE@Q}" ;;
-		"existing_partitions")
-			if [[ "$PARTITIONING_USE_SWAP" ]]; then
-				swapdev=${PARTITIONING_SWAP_DEVICE:-false}
-			else
-				swapdev=false
-			fi
-		    define_disk_configuration_function "create_existing_partitions_layout boot=${PARTITIONING_BOOT_DEVICE@Q} swap=${swapdev@Q} type=${PARTITIONING_BOOT_TYPE@Q}" "${PARTITIONING_DEVICE@Q}" ;;
-		"zfs_centric")         define_disk_configuration_function "create_zfs_centric_layout swap=$(define_swap) type=${PARTITIONING_BOOT_TYPE@Q} encrypt=${PARTITIONING_ZFS_USE_ENCRYPTION@Q} compress=$(define_zfs_compression) pool_type=${PARTITIONING_ZFS_POOL_TYPE@Q}" "${PARTITIONING_DEVICES[@]@Q}" ;;
-		"btrfs_centric")       define_disk_configuration_function "create_btrfs_centric_layout swap=$(define_swap) type=${PARTITIONING_BOOT_TYPE@Q} raid_type=${PARTITIONING_BTRFS_RAID_TYPE@Q} luks=${PARTITIONING_USE_LUKS@Q}" "${PARTITIONING_DEVICES[@]@Q}" ;;
-		"raid0_luks")          define_disk_configuration_function "create_raid0_luks_layout swap=$(define_swap) type=${PARTITIONING_BOOT_TYPE@Q} luks=${PARTITIONING_USE_LUKS@Q} root_fs=${PARTITIONING_ROOT_FS@Q}" "${PARTITIONING_DEVICES[@]@Q}" ;;
-		"raid1_luks")          define_disk_configuration_function "create_raid1_luks_layout swap=$(define_swap) type=${PARTITIONING_BOOT_TYPE@Q} luks=${PARTITIONING_USE_LUKS@Q} root_fs=${PARTITIONING_ROOT_FS@Q}" "${PARTITIONING_DEVICES[@]@Q}" ;;
-		"custom")
-			# Show current function declaration, trim trailing whitespace
-			declare -f disk_configuration \
-				| sed -e 's/\s*$//'
-			;;
+		"zfs_centric")         define_disk_configuration_function "create_zfs_centric_layout swap=$(define_swap) type=${PARTITIONING_BOOT_TYPE@Q} encrypt=${PARTITIONING_ZFS_USE_ENCRYPTION@Q} compress=$(define_zfs_compression) pool_type=${PARTITIONING_ZFS_POOL_TYPE@Q}" "${PARTITIONING_DEVICES[@]@Q}"
+		;;
 	esac
 }
 
@@ -204,29 +146,16 @@ ALL_STAGE3_VARIANTS=(
 )
 
 ALL_PARTITIONING_SCHEMES=(
-	"classic_single_disk" "Classic single disk layout (boot/efi, swap?, root)"
-	"existing_partitions" "Skip partitioning, use existing pre-formatted partitions"
 	"zfs_centric"         "ZFS centric (optional ZFS compression and encryption)"
-	"btrfs_centric"       "Btrfs centric (optional raid0/1 via btrfs)"
-	"raid0_luks"          "Raid0 (N>=2 disks) and luks for root"
-	"raid1_luks"          "Raid1 (N>=2 disks) and luks for root"
-	"custom"              "Custom (expert option; edit the config manually later)"
 )
 
 PARTITIONING_BOOT_TYPES=(
 	"efi" "efi$([[ $HAS_EFI_SUPPORT == true ]] && echo -n "" || echo -n " (!! $EFI_UNSUPPORTED_MESSAGE_SHORT !!)")"
-	"bios" "bios"
 )
-PARTITIONING_ROOT_FS_TYPES=("ext4" "btrfs")
-PARTITIONING_BTRFS_RAID_TYPES=("raid0" "raid1")
 PARTITIONING_ZFS_POOL_TYPES=("standard" "custom")
 PARTITIONING_ZFS_COMPRESSIONS=("on" "gzip" "lz4" "lzjb" "zle" "zstd" "zstd-fast")
 
 PORTAGE_SYNC_TYPES=("git" "rsync")
-
-function create_single_disk_layout() {
-	create_classic_single_disk_layout "$@"
-}
 
 function parse_swap() {
 	if [[ $1 == "false" ]]; then
@@ -248,67 +177,6 @@ function parse_zfs_compression() {
 	fi
 }
 
-function create_classic_single_disk_layout() {
-	PARTITIONING_SCHEME="classic_single_disk"
-
-	local known_arguments=('+swap' '?type' '?luks' '?root_fs')
-	local extra_arguments=()
-	declare -A arguments; parse_arguments "$@"
-
-	PARTITIONING_DEVICE="${extra_arguments[0]}"
-	parse_swap "${arguments[swap]}"
-	PARTITIONING_BOOT_TYPE="${arguments[type]}"
-	PARTITIONING_USE_LUKS="${arguments[luks]:-false}"
-	PARTITIONING_ROOT_FS="${arguments[root_fs]:-ext4}"
-}
-
-function create_existing_partitions_layout() {
-	PARTITIONING_SCHEME="existing_partitions"
-
-	local known_arguments=('+swap' '+boot' '?type')
-	local extra_arguments=()
-	declare -A arguments; parse_arguments "$@"
-
-	PARTITIONING_DEVICE="${extra_arguments[0]}"
-	if [[ "${arguments[swap]}" == "false" ]]; then
-		PARTITIONING_USE_SWAP=false
-		PARTITIONING_SWAP_DEVICE=""
-	else
-		PARTITIONING_USE_SWAP=true
-		PARTITIONING_SWAP_DEVICE="${arguments[swap]}"
-	fi
-	PARTITIONING_BOOT_TYPE="${arguments[type]}"
-	PARTITIONING_BOOT_DEVICE="${arguments[boot]}"
-}
-
-function create_raid0_luks_layout() {
-	PARTITIONING_SCHEME="raid0_luks"
-
-	local known_arguments=('+swap' '?type' '?luks' '?root_fs')
-	local extra_arguments=()
-	declare -A arguments; parse_arguments "$@"
-
-	PARTITIONING_DEVICES=("${extra_arguments[@]}")
-	parse_swap "${arguments[swap]}"
-	PARTITIONING_BOOT_TYPE="${arguments[type]}"
-	PARTITIONING_USE_LUKS="${arguments[luks]:-true}"
-	PARTITIONING_ROOT_FS="${arguments[root_fs]:-ext4}"
-}
-
-function create_raid1_luks_layout() {
-	PARTITIONING_SCHEME="raid1_luks"
-
-	local known_arguments=('+swap' '?type' '?luks' '?root_fs')
-	local extra_arguments=()
-	declare -A arguments; parse_arguments "$@"
-
-	PARTITIONING_DEVICES=("${extra_arguments[@]}")
-	parse_swap "${arguments[swap]}"
-	PARTITIONING_BOOT_TYPE="${arguments[type]}"
-	PARTITIONING_USE_LUKS="${arguments[luks]:-true}"
-	PARTITIONING_ROOT_FS="${arguments[root_fs]:-ext4}"
-}
-
 function create_zfs_centric_layout() {
 	PARTITIONING_SCHEME="zfs_centric"
 
@@ -324,31 +192,9 @@ function create_zfs_centric_layout() {
 	parse_zfs_compression "${arguments[compress]:-false}"
 }
 
-function create_btrfs_raid_layout() {
-	create_btrfs_centric_layout "$@"
-}
-
-function create_btrfs_centric_layout() {
-	PARTITIONING_SCHEME="btrfs_centric"
-
-	# shellcheck disable=SC2034
-	local known_arguments=('+swap' '?type' '?raid_type' '?luks')
-	local extra_arguments=()
-	declare -A arguments; parse_arguments "$@"
-
-	PARTITIONING_DEVICES=("${extra_arguments[@]}")
-	parse_swap "${arguments[swap]}"
-	PARTITIONING_BOOT_TYPE="${arguments[type]}"
-	PARTITIONING_USE_LUKS="${arguments[luks]:-false}"
-	PARTITIONING_BTRFS_RAID_TYPE="${arguments[raid_type]:-raid0}"
-}
-
-
 ################################################
 # Configuration constants
 
-get_all_keymaps
-get_all_timezones
 readarray -t SUPPORTED_LOCALES < "$GENTOO_INSTALL_REPO_DIR/contrib/i18n_supported"
 readarray -t LOCALE_A < <(locale -a)
 
@@ -405,39 +251,28 @@ function load_config() {
 
 function load_default_config() {
 	HOSTNAME="gentoo"
-	TIMEZONE="$(get_timezone)"
-	KEYMAP="$(get_default_keymap)"
+	TIMEZONE="America/Chicago"
+	KEYMAP="us"
 	KEYMAP_INITRAMFS="$KEYMAP"
-	LOCALES="C.UTF-8 UTF-8"
-	LOCALE="C.UTF-8"
-
-	SYSTEMD_NETWORKD=true
-	SYSTEMD_NETWORKD_INTERFACE_NAME="en*"
-	SYSTEMD_NETWORKD_DHCP=true
-	SYSTEMD_NETWORKD_ADDRESSES=("192.168.1.100/32" "fd00::1/64")
-	SYSTEMD_NETWORKD_GATEWAY="192.168.1.1"
-	SYSTEMD_INITRAMFS_SSHD=false
+	LOCALES=$'C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nen_US ISO-8859-1'
+	LOCALE="en_US.utf8"
 
 	function disk_configuration() {
-		#create_zfs_centric_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" encrypt=true compress=zstd pool_type=standard /dev/sdX
-		create_classic_single_disk_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" luks=true root_fs=ext4 /dev/sdX
+		create_zfs_centric_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" encrypt=false compress=zstd pool_type=standard /dev/sdX
 	}
 
-	STAGE3_VARIANT="systemd"
+	STAGE3_VARIANT="openrc"
 	PORTAGE_SYNC_TYPE="git"
 	PORTAGE_GIT_FULL_HISTORY=false
-	PORTAGE_GIT_MIRROR="https://anongit.gentoo.org/git/repo/sync/gentoo.git"
+	PORTAGE_GIT_MIRROR="https://github.com/gentoo-mirror/gentoo.git"
 
-	GENTOO_MIRROR="https://mirror.eu.oneandone.net/linux/distributions/gentoo/gentoo"
+	GENTOO_MIRROR="https://distfiles.gentoo.org"
 	GENTOO_ARCH="amd64"
-
-	USE_PORTAGE_TESTING=true
-	SELECT_MIRRORS=false
-	SELECT_MIRRORS_LARGE_FILE=false
+	USE_PORTAGE_TESTING=false
 
 	ADDITIONAL_PACKAGES=()
 	ENABLE_SSHD=true
-	ENABLE_BINPKG=false
+	ENABLE_BINPKG=true
 	ROOT_SSH_AUTHORIZED_KEYS=""
 	
 
@@ -857,18 +692,11 @@ init_menu_size
 MENU_ITEMS=(
 	"PARTITIONING_SCHEME"
 	"PARTITIONING_BOOT_TYPE"
-	"PARTITIONING_BOOT_DEVICE"
 	"PARTITIONING_USE_SWAP"
-	"PARTITIONING_SWAP"
-	"PARTITIONING_SWAP_DEVICE"
-	"PARTITIONING_ROOT_FS"
-	"PARTITIONING_USE_LUKS"
 	"PARTITIONING_ZFS_POOL_TYPE"
 	"PARTITIONING_ZFS_USE_ENCRYPTION"
 	"PARTITIONING_ZFS_USE_COMPRESSION"
 	"PARTITIONING_ZFS_COMPRESSION"
-	"PARTITIONING_BTRFS_RAID_TYPE"
-	"PARTITIONING_DEVICE"
 	"PARTITIONING_DEVICES"
 	"--------"
 	"HOSTNAME"
@@ -878,22 +706,13 @@ MENU_ITEMS=(
 	"KEYMAP_INITRAMFS"
 	"LOCALES"
 	"LOCALE"
-	"SYSTEMD_NETWORKD"
-	"SYSTEMD_INITRAMFS_SSHD"
-	"SYSTEMD_NETWORKD_INTERFACE_NAME"
-	"SYSTEMD_NETWORKD_DHCP"
-	"SYSTEMD_NETWORKD_ADDRESSES"
-	"SYSTEMD_NETWORKD_GATEWAY"
 	"--------"
 	"STAGE3_VARIANT"
 	"PORTAGE_SYNC_TYPE"
 	"PORTAGE_GIT_FULL_HISTORY"
 	"PORTAGE_GIT_MIRROR"
-	"GENTOO_MIRROR"
 	"GENTOO_ARCH"
 	"USE_PORTAGE_TESTING"
-	"SELECT_MIRRORS"
-	"SELECT_MIRRORS_LARGE_FILE"
 	"--------"
 	"ENABLE_SSHD"
 	"ENABLE_BINPKG"
@@ -920,13 +739,7 @@ function PARTITIONING_SCHEME_menu()  {
 	then
 		# Set disk scheme
 		case "$dialog_out" in
-			"classic_single_disk") create_classic_single_disk_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" luks=false root_fs=ext4 /dev/sdX ;;
-			"existing_partitions") create_existing_partitions_layout boot=/dev/sdA swap=false type="$DEFAULT_BOOT_TYPE" /dev/sdX ;;
-			"zfs_centric")         create_zfs_centric_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" encrypt=true compress=zstd pool_type=standard /dev/sdX ;;
-			"btrfs_centric")       create_btrfs_centric_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" raid_type=raid0 luks=false /dev/sdX ;;
-			"raid0_luks")          create_raid0_luks_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" luks=true root_fs=ext4 /dev/sdX /dev/sdY ;;
-			"raid1_luks")          create_raid1_luks_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" luks=true root_fs=ext4 /dev/sdX /dev/sdY ;;
-			"custom")              PARTITIONING_SCHEME="$dialog_out" ;;
+			"zfs_centric")         create_zfs_centric_layout swap=8GiB type="$DEFAULT_BOOT_TYPE" encrypt=false compress=zstd pool_type=standard /dev/sdX ;;
 		esac
 		UNSAVED_CHANGES=true
 	else
@@ -964,21 +777,6 @@ function PARTITIONING_BOOT_DEVICE_label() {
 		echo " ├ (\Z1$devshort\Zn)"
 	fi
 }
-function PARTITIONING_BOOT_DEVICE_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && one_of "$PARTITIONING_SCHEME" "existing_partitions"; }
-function PARTITIONING_BOOT_DEVICE_help()  { echo "The device to use for the boot partition. For EFI systems this is the efi partition. Must be formatted already."; }
-function PARTITIONING_BOOT_DEVICE_menu()  {
-	if menu_select_device \
-		"Select boot device" \
-		"Select the device containing the EFI filesystem or /boot partition respectively for systems using efi or bios boot." \
-		"$PARTITIONING_BOOT_DEVICE"
-	then
-		PARTITIONING_BOOT_DEVICE="$dialog_out"
-		UNSAVED_CHANGES=true
-	else
-		# Return to menu
-		true
-	fi
-}
 
 function PARTITIONING_USE_SWAP_tag()   { echo " ├ Use swap"; }
 function PARTITIONING_USE_SWAP_label() { on_off_label "$PARTITIONING_USE_SWAP" " ├ "; }
@@ -988,21 +786,6 @@ function PARTITIONING_USE_SWAP_menu()  {
 	on_off_toggle "PARTITIONING_USE_SWAP"
 	UNSAVED_CHANGES=true
 }
-
-function PARTITIONING_SWAP_tag()   { echo " │  └ Swap amount"; }
-function PARTITIONING_SWAP_label() { echo " │  └ ($PARTITIONING_SWAP)"; }
-function PARTITIONING_SWAP_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && is_on "$PARTITIONING_USE_SWAP" && ! one_of "$PARTITIONING_SCHEME" "existing_partitions"; }
-function PARTITIONING_SWAP_help()  { echo "Select the amount of swap to use."; }
-function PARTITIONING_SWAP_menu()  {
-	dialog \
-		--title "Select swap amount" \
-		--inputbox "Enter the amount of swap for the new system. Use the correct suffix (e.g. 16GiB, 1000MB)." \
-		"${INPUTBOX_SIZE[@]}" "$PARTITIONING_SWAP" \
-		|| return 0
-	PARTITIONING_SWAP="$dialog_out"
-	UNSAVED_CHANGES=true
-}
-
 
 function PARTITIONING_SWAP_DEVICE_tag()   { echo " │  └ Swap Device"; }
 function PARTITIONING_SWAP_DEVICE_label() {
@@ -1014,49 +797,6 @@ function PARTITIONING_SWAP_DEVICE_label() {
 	else
 		echo " │  └ (\Z1$devshort\Zn)"
 	fi
-}
-function PARTITIONING_SWAP_DEVICE_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && is_on "$PARTITIONING_USE_SWAP" && one_of "$PARTITIONING_SCHEME" "existing_partitions"; }
-function PARTITIONING_SWAP_DEVICE_help()  { echo "The device to use as swap."; }
-function PARTITIONING_SWAP_DEVICE_menu()  {
-	if menu_select_device \
-		"Select swap device" \
-		"Select the device to use as swap." \
-		"$PARTITIONING_SWAP_DEVICE"
-	then
-		PARTITIONING_SWAP_DEVICE="$dialog_out"
-		UNSAVED_CHANGES=true
-	else
-		# Return to menu
-		true
-	fi
-}
-
-function PARTITIONING_ROOT_FS_tag()   { echo " ├ Root filesystem"; }
-function PARTITIONING_ROOT_FS_label() { echo " ├ ($PARTITIONING_ROOT_FS)"; }
-function PARTITIONING_ROOT_FS_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && one_of "$PARTITIONING_SCHEME" "classic_single_disk" "raid0_luks" "raid1_luks"; }
-function PARTITIONING_ROOT_FS_help()  { echo "Select the amount of swap to use."; }
-function PARTITIONING_ROOT_FS_menu()  {
-	if menu_radiolist \
-		"Select root fstype" \
-		"Select which filesystem to use on the root partition." \
-		"$PARTITIONING_ROOT_FS" \
-		"${PARTITIONING_ROOT_FS_TYPES[@]}"
-	then
-		PARTITIONING_ROOT_FS="$dialog_out"
-		UNSAVED_CHANGES=true
-	else
-		# Return to menu
-		true
-	fi
-}
-
-function PARTITIONING_USE_LUKS_tag()   { echo " ├ LUKS Encryption"; }
-function PARTITIONING_USE_LUKS_label() { on_off_label "$PARTITIONING_USE_LUKS" " ├ "; }
-function PARTITIONING_USE_LUKS_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && one_of "$PARTITIONING_SCHEME" "classic_single_disk" "btrfs_centric"; }
-function PARTITIONING_USE_LUKS_help()  { echo "Determines if LUKS will be used to encrypt your root partition. You can export the desired encryption key via export GENTOO_INSTALL_ENCRYPTION_KEY='...' before installing if you don't want to be asked."; }
-function PARTITIONING_USE_LUKS_menu()  {
-	on_off_toggle "PARTITIONING_USE_LUKS"
-	UNSAVED_CHANGES=true
 }
 
 function PARTITIONING_ZFS_USE_ENCRYPTION_tag()   { echo " ├ ZFS Encryption"; }
@@ -1118,25 +858,6 @@ function PARTITIONING_ZFS_POOL_TYPE_menu()  {
 	fi
 }
 
-function PARTITIONING_BTRFS_RAID_TYPE_tag()   { echo " ├ Btrfs raid type"; }
-function PARTITIONING_BTRFS_RAID_TYPE_label() { echo " ├ ($PARTITIONING_BTRFS_RAID_TYPE)"; }
-function PARTITIONING_BTRFS_RAID_TYPE_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && one_of "$PARTITIONING_SCHEME" "btrfs_centric"; }
-function PARTITIONING_BTRFS_RAID_TYPE_help()  { echo "Determines the type of the btrfs pool."; }
-function PARTITIONING_BTRFS_RAID_TYPE_menu()  {
-	if menu_radiolist \
-		"Select raid type" \
-		"Select which raid type to use for the btrfs pool." \
-		"$PARTITIONING_BTRFS_RAID_TYPE" \
-		"${PARTITIONING_BTRFS_RAID_TYPES[@]}"
-	then
-		PARTITIONING_BTRFS_RAID_TYPE="$dialog_out"
-		UNSAVED_CHANGES=true
-	else
-		# Return to menu
-		true
-	fi
-}
-
 function PARTITIONING_DEVICE_tag()   { echo " └ Device"; }
 function PARTITIONING_DEVICE_label() {
 	local devshort=$PARTITIONING_DEVICE
@@ -1145,21 +866,6 @@ function PARTITIONING_DEVICE_label() {
 		echo " └ ($devshort)"
 	else
 		echo " └ (\Z1$devshort\Zn)"
-	fi
-}
-function PARTITIONING_DEVICE_show()  { [[ $PARTITIONING_SCHEME != "custom" ]] && one_of "$PARTITIONING_SCHEME" "classic_single_disk" "existing_partitions"; }
-function PARTITIONING_DEVICE_help()  { echo "The block device to which the layout will be applied."; }
-function PARTITIONING_DEVICE_menu()  {
-	if menu_select_device \
-		"Select root device" \
-		"Select the device to use as the root device." \
-		"$PARTITIONING_DEVICE"
-	then
-		PARTITIONING_DEVICE="$dialog_out"
-		UNSAVED_CHANGES=true
-	else
-		# Return to menu
-		true
 	fi
 }
 
@@ -1287,7 +993,7 @@ function KEYMAP_INITRAMFS_menu()  {
 }
 
 function LOCALES_tag()   { echo "Locales"; }
-function LOCALES_label() { echo "$N_LOCALES selected"; }
+function LOCALES_label() { echo "3 selected"; }
 function LOCALES_show()  { return 0; }
 function LOCALES_help()  { echo "The locales to generate for the new system. Be careful that the syntax for locales is a different from the resulting name of the generated locales of locale-gen. For example, the locale 'en_US.utf8' is enabled via 'en_US.UTF-8 UTF-8')."; }
 function LOCALES_menu()  {
@@ -1318,76 +1024,6 @@ function LOCALE_menu()  {
 		# Return to menu
 		true
 	fi
-}
-
-function SYSTEMD_NETWORKD_tag()   { echo "Configure network"; }
-function SYSTEMD_NETWORKD_label() { on_off_label "$SYSTEMD_NETWORKD"; }
-function SYSTEMD_NETWORKD_show()  { [[ $STAGE3_VARIANT == *systemd* ]]; }
-function SYSTEMD_NETWORKD_help()  { echo "Enable systemd-network to configure networking on the new system."; }
-function SYSTEMD_NETWORKD_menu()  {
-	on_off_toggle "SYSTEMD_NETWORKD"
-	UNSAVED_CHANGES=true
-}
-
-function SYSTEMD_INITRAMFS_SSHD_tag()   { echo " ├ Enable sshd in initramfs"; }
-function SYSTEMD_INITRAMFS_SSHD_label() { on_off_label "$SYSTEMD_INITRAMFS_SSHD" " ├ "; }
-function SYSTEMD_INITRAMFS_SSHD_show()  { [[ $STAGE3_VARIANT == *systemd* ]] && is_on "$SYSTEMD_NETWORKD"; }
-function SYSTEMD_INITRAMFS_SSHD_help()  { echo "Install and enable sshd in the initramfs. This can be used to unlock encrypted partitions / ZFS via ssh, or to get an emergency shell. Visit https://github.com/gsauthof/dracut-sshd for more information."; }
-function SYSTEMD_INITRAMFS_SSHD_menu()  {
-	on_off_toggle "SYSTEMD_INITRAMFS_SSHD"
-	UNSAVED_CHANGES=true
-}
-
-function SYSTEMD_NETWORKD_INTERFACE_NAME_tag()   { echo " ├ Interface Name"; }
-function SYSTEMD_NETWORKD_INTERFACE_NAME_label() { echo " ├ ($(ellipsis 20 "$SYSTEMD_NETWORKD_INTERFACE_NAME"))"; }
-function SYSTEMD_NETWORKD_INTERFACE_NAME_show()  { [[ $STAGE3_VARIANT == *systemd* ]] && is_on "$SYSTEMD_NETWORKD"; }
-function SYSTEMD_NETWORKD_INTERFACE_NAME_help()  { echo "The network interface(s) to configure. Defaults to all interfaces matching en*."; }
-function SYSTEMD_NETWORKD_INTERFACE_NAME_menu()  {
-	dialog \
-		--title "Network Interface Name" \
-		--inputbox "Enter the network interface name which should be configured. Can include wildcards." \
-		"${INPUTBOX_SIZE[@]}" "$SYSTEMD_NETWORKD_INTERFACE_NAME" \
-		|| return 0
-	SYSTEMD_NETWORKD_INTERFACE_NAME="$dialog_out"
-	UNSAVED_CHANGES=true
-}
-
-function SYSTEMD_NETWORKD_DHCP_tag()   { echo " └ Static IP"; }
-function SYSTEMD_NETWORKD_DHCP_label() { on_off_label_inverted "$SYSTEMD_NETWORKD_DHCP" " └ "; }
-function SYSTEMD_NETWORKD_DHCP_show()  { [[ $STAGE3_VARIANT == *systemd* ]] && is_on "$SYSTEMD_NETWORKD"; }
-function SYSTEMD_NETWORKD_DHCP_help()  { echo "Use DHCP to obtain network configuration."; }
-function SYSTEMD_NETWORKD_DHCP_menu()  {
-	on_off_toggle "SYSTEMD_NETWORKD_DHCP"
-	UNSAVED_CHANGES=true
-}
-
-function SYSTEMD_NETWORKD_ADDRESSES_tag()   { echo "   ├ Addresses"; }
-function SYSTEMD_NETWORKD_ADDRESSES_label() { echo "   ├ ($(ellipsis 20 "${SYSTEMD_NETWORKD_ADDRESSES[*]}"))"; }
-function SYSTEMD_NETWORKD_ADDRESSES_show()  { [[ $STAGE3_VARIANT == *systemd* ]] && is_on "$SYSTEMD_NETWORKD" && is_off "$SYSTEMD_NETWORKD_DHCP"; }
-function SYSTEMD_NETWORKD_ADDRESSES_help()  { echo "A space-separated list of addresses with CIDR mask to assign to the network interface."; }
-function SYSTEMD_NETWORKD_ADDRESSES_menu()  {
-	dialog \
-		--title "Network Addresses" \
-		--inputbox "A space-separated list of addresses with CIDR mask to assign to the network interface." \
-		"${INPUTBOX_SIZE[@]}" "${SYSTEMD_NETWORKD_ADDRESSES[*]}" \
-		|| return 0
-	# shellcheck disable=SC2206
-	SYSTEMD_NETWORKD_ADDRESSES=($dialog_out)
-	UNSAVED_CHANGES=true
-}
-
-function SYSTEMD_NETWORKD_GATEWAY_tag()   { echo "   └ Gateway"; }
-function SYSTEMD_NETWORKD_GATEWAY_label() { echo "   └ ($(ellipsis 20 "$SYSTEMD_NETWORKD_GATEWAY"))"; }
-function SYSTEMD_NETWORKD_GATEWAY_show()  { [[ $STAGE3_VARIANT == *systemd* ]] && is_on "$SYSTEMD_NETWORKD" && is_off "$SYSTEMD_NETWORKD_DHCP"; }
-function SYSTEMD_NETWORKD_GATEWAY_help()  { echo "The gateway address for the network."; }
-function SYSTEMD_NETWORKD_GATEWAY_menu()  {
-	dialog \
-		--title "Network Gateway" \
-		--inputbox "The gateway address for the network." \
-		"${INPUTBOX_SIZE[@]}" "$SYSTEMD_NETWORKD_GATEWAY" \
-		|| return 0
-	SYSTEMD_NETWORKD_GATEWAY="$dialog_out"
-	UNSAVED_CHANGES=true
 }
 
 function STAGE3_VARIANT_tag()   { echo "Stage3 variant & Init system"; }
@@ -1493,24 +1129,6 @@ function USE_PORTAGE_TESTING_menu()  {
 	UNSAVED_CHANGES=true
 }
 
-function SELECT_MIRRORS_tag()   { echo "Run mirrorselect"; }
-function SELECT_MIRRORS_label() { on_off_label "$SELECT_MIRRORS"; }
-function SELECT_MIRRORS_show()  { return 0; }
-function SELECT_MIRRORS_help()  { echo "Determines if mirrorselect will be used to determine the best gentoo mirror for the new system."; }
-function SELECT_MIRRORS_menu()  {
-	on_off_toggle "SELECT_MIRRORS"
-	UNSAVED_CHANGES=true
-}
-
-function SELECT_MIRRORS_LARGE_FILE_tag()   { echo " └ Use large files"; }
-function SELECT_MIRRORS_LARGE_FILE_label() { on_off_label "$SELECT_MIRRORS_LARGE_FILE" " └ "; }
-function SELECT_MIRRORS_LARGE_FILE_show()  { is_on "$SELECT_MIRRORS"; }
-function SELECT_MIRRORS_LARGE_FILE_help()  { echo "Determines if mirrorselect uses large files (~10MB) to test mirrors."; }
-function SELECT_MIRRORS_LARGE_FILE_menu()  {
-	on_off_toggle "SELECT_MIRRORS_LARGE_FILE"
-	UNSAVED_CHANGES=true
-}
-
 function ENABLE_SSHD_tag()   { echo "Enable sshd"; }
 function ENABLE_SSHD_label() { on_off_label "$ENABLE_SSHD"; }
 function ENABLE_SSHD_show()  { return 0; }
@@ -1603,14 +1221,6 @@ KEYMAP_INITRAMFS=${KEYMAP_INITRAMFS@Q}
 LOCALES=${LOCALES@Q}
 LOCALE=${LOCALE@Q}
 
-SYSTEMD_NETWORKD=${SYSTEMD_NETWORKD@Q}
-SYSTEMD_NETWORKD_INTERFACE_NAME=${SYSTEMD_NETWORKD_INTERFACE_NAME@Q}
-SYSTEMD_NETWORKD_DHCP=${SYSTEMD_NETWORKD_DHCP@Q}
-SYSTEMD_NETWORKD_ADDRESSES=${SYSTEMD_NETWORKD_ADDRESSES@Q}
-SYSTEMD_NETWORKD_GATEWAY=${SYSTEMD_NETWORKD_GATEWAY@Q}
-SYSTEMD_INITRAMFS_SSHD=${SYSTEMD_INITRAMFS_SSHD@Q}
-
-
 ################################################
 # Gentoo configuration
 
@@ -1622,8 +1232,6 @@ GENTOO_ARCH=${GENTOO_ARCH@Q}
 STAGE3_VARIANT=${STAGE3_VARIANT@Q}
 STAGE3_BASENAME="stage3-\$GENTOO_ARCH-\$STAGE3_VARIANT"
 USE_PORTAGE_TESTING=${USE_PORTAGE_TESTING@Q}
-SELECT_MIRRORS=${SELECT_MIRRORS@Q}
-SELECT_MIRRORS_LARGE_FILE=${SELECT_MIRRORS_LARGE_FILE@Q}
 SYSTEMD=\$([[ \$STAGE3_VARIANT == *systemd* ]] && echo "true" || echo "false")
 MUSL=\$([[ \$STAGE3_VARIANT == *musl* ]] && echo "true" || echo "false")
 

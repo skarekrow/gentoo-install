@@ -13,73 +13,33 @@ function install_stage3() {
 }
 
 function configure_base_system() {
-	if [[ $MUSL == "true" ]]; then
-		einfo "Installing musl-locales"
-		if [[ $USE_PORTAGE_TESTING == "false" ]]; then
-			echo "sys-apps/musl-locales" >> /etc/portage/package.accept_keywords/musl-locales
-		fi
-		try emerge --verbose sys-apps/musl-locales
-	else
-		einfo "Generating locales"
-		echo "$LOCALES" > /etc/locale.gen \
-			|| die "Could not write /etc/locale.gen"
-		locale-gen \
-			|| die "Could not generate locales"
-	fi
+	einfo "Generating locales"
+	echo "$LOCALES" > /etc/locale.gen \
+		|| die "Could not write /etc/locale.gen"
+	locale-gen \
+		|| die "Could not generate locales"
 
-	if [[ $SYSTEMD == "true" ]]; then
-		einfo "Setting machine-id"
-		systemd-machine-id-setup \
-			|| die "Could not setup systemd machine id"
+	# Set hostname
+	einfo "Selecting hostname"
+	sed -i "/hostname=/c\\hostname=\"$HOSTNAME\"" /etc/conf.d/hostname \
+		|| die "Could not sed replace in /etc/conf.d/hostname"
 
-		# Set hostname
-		einfo "Selecting hostname"
-		echo "$HOSTNAME" > /etc/hostname \
-			|| die "Could not write /etc/hostname"
+	# Set timezone
+	einfo "Selecting timezone"
+	echo "$TIMEZONE" > /etc/timezone \
+		|| die "Could not write /etc/timezone"
+	chmod 644 /etc/timezone \
+		|| die "Could not set correct permissions for /etc/timezone"
+	try emerge -v --config sys-libs/timezone-data
 
-		# Set keymap
-		einfo "Selecting keymap"
-		echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf \
-			|| die "Could not write /etc/vconsole.conf"
+	# Set keymap
+	einfo "Selecting keymap"
+	sed -i "/keymap=/c\\keymap=\"$KEYMAP\"" /etc/conf.d/keymaps \
+		|| die "Could not sed replace in /etc/conf.d/keymaps"
 
-		# Set locale
-		einfo "Selecting locale"
-		echo "LANG=$LOCALE" > /etc/locale.conf \
-			|| die "Could not write /etc/locale.conf"
-
-		einfo "Selecting timezone"
-		ln -sfn "../usr/share/zoneinfo/$TIMEZONE" /etc/localtime \
-			|| die "Could not change /etc/localtime link"
-	else
-		# Set hostname
-		einfo "Selecting hostname"
-		sed -i "/hostname=/c\\hostname=\"$HOSTNAME\"" /etc/conf.d/hostname \
-			|| die "Could not sed replace in /etc/conf.d/hostname"
-
-		# Set timezone
-		if [[ $MUSL == "true" ]]; then
-			try emerge -v sys-libs/timezone-data
-			einfo "Selecting timezone"
-			echo -e "\nTZ=\"$TIMEZONE\"" >> /etc/env.d/00musl \
-				|| die "Could not write to /etc/env.d/00musl"
-		else
-			einfo "Selecting timezone"
-			echo "$TIMEZONE" > /etc/timezone \
-				|| die "Could not write /etc/timezone"
-			chmod 644 /etc/timezone \
-				|| die "Could not set correct permissions for /etc/timezone"
-			try emerge -v --config sys-libs/timezone-data
-		fi
-
-		# Set keymap
-		einfo "Selecting keymap"
-		sed -i "/keymap=/c\\keymap=\"$KEYMAP\"" /etc/conf.d/keymaps \
-			|| die "Could not sed replace in /etc/conf.d/keymaps"
-
-		# Set locale
-		einfo "Selecting locale"
-		try eselect locale set "$LOCALE"
-	fi
+	# Set locale
+	einfo "Selecting locale"
+	try eselect locale set "$LOCALE"
 
 	# Update environment
 	env_update
@@ -88,36 +48,83 @@ function configure_base_system() {
 function configure_portage() {
 	# Prepare /etc/portage for autounmask
 	mkdir_or_die 0755 "/etc/portage/package.use"
-	touch_or_die 0644 "/etc/portage/package.use/zz-autounmask"
 	mkdir_or_die 0755 "/etc/portage/package.keywords"
-	touch_or_die 0644 "/etc/portage/package.keywords/zz-autounmask"
+	mkdir_or_die 0755 "/etc/portage/package.accept_keywords"
 	touch_or_die 0644 "/etc/portage/package.license"
 
-	if [[ $SELECT_MIRRORS == "true" ]]; then
-		einfo "Temporarily installing mirrorselect"
-		try emerge --verbose --oneshot app-portage/mirrorselect
+	getuto
+	chmod 644 /etc/portage/gnupg/pubring.kbx \
+		|| die "Could not chmod 644 /etc/portage/gnupg/pubring.kbx"
 
-		einfo "Selecting fastest portage mirrors"
-		mirrorselect_params=("-s" "4" "-b" "10")
-		[[ $SELECT_MIRRORS_LARGE_FILE == "true" ]] \
-			&& mirrorselect_params+=("-D")
-		try mirrorselect "${mirrorselect_params[@]}"
-	fi
+	cat > '/etc/portage/bashrc' << 'EOF'
+# From /usr/share/doc/etckeeper*/bashrc.example
+case "${EBUILD_PHASE}" in
+        setup|prerm) etckeeper pre-install ;;
+        postinst|postrm) etckeeper post-install ;;
+esac
+EOF
 
-	if [[ $ENABLE_BINPKG == "true" ]]; then
-		echo 'FEATURES="getbinpkg"' >> /etc/portage/make.conf
-  		getuto
-    		chmod 644 /etc/portage/gnupg/pubring.kbx
-	fi
+	cat > '/etc/portage/make.conf' << 'EOF'
+# These settings were set by the catalyst build script that automatically
+# built this stage.
+# Please consult /usr/share/portage/config/make.conf.example for a more
+# detailed example.
+COMMON_FLAGS="-march=native -O2 -pipe"
+CFLAGS="${COMMON_FLAGS}"
+CXXFLAGS="${COMMON_FLAGS}"
+FCFLAGS="${COMMON_FLAGS}"
+FFLAGS="${COMMON_FLAGS}"
+
+# NOTE: This stage was built with the bindist Use flag enabled
+
+# This sets the language of build output to English.
+# Please keep this setting intact when reporting bugs.
+LC_MESSAGES=C.utf8
+
+# Appending getbinpkg to the list of values within the FEATURESvariable
+FEATURES="${FEATURES} getbinpkg"
+# Require signatures
+FEATURES="${FEATURES} binpkg-request-signature"
+
+USE="dist-kernel ipv6"
+
+EMERGE_DEFAULT_OPTS="--jobs=10 --ask"
+ACCEPT_LICENSE="*"
+EOF
+
+	cat > "/etc/portage/package.accept_keywords/installkernel" << 'EOF'
+sys-kernel/installkernel **
+sys-boot/uefi-mkconfig **
+EOF
+
+	cat > "/etc/portage/package.use/installkernel" << 'EOF'
+sys-kernel/installkernel dracut efistub
+EOF
+
+	cat > "/etc/portage/package.use/linux-firmware" << 'EOF'
+sys-kernel/linux-firmware initramfs bindist redistributable dist-kernel unknown-license
+EOF
+
+	cat > "/etc/portage/package.use/intel-microcode" << 'EOF'
+sys-firmware/intel-microcode initramfs
+EOF
 
 	chmod 644 /etc/portage/make.conf \
 		|| die "Could not chmod 644 /etc/portage/make.conf"
+	chmod 644 /etc/portage/bashrc \
+		|| die "Could not chmod 644 /etc/portage/bashrc"
+	chmod 644 /etc/portage/package.accept_keywords/installkernel \
+		|| die "Could not chmod 644 /etc/portage/package.accept_keywords/installkernel"
+	chmod 644 /etc/portage/package.use/installkernel \
+		|| die "Could not chmod 644 /etc/portage/package.use/installkernel"
+	chmod 644 /etc/portage/package.use/linux-firmware \
+		|| die "Could not chmod 644 /etc/portage/package.use/linux-firmware"
+	chmod 644 /etc/portage/package.use/intel-microcode \
+		|| die "Could not chmod 644 /etc/portage/package.use/intel-microcode"
 }
 
 function enable_sshd() {
 	einfo "Installing and enabling sshd"
-	install -m0600 -o root -g root "$GENTOO_INSTALL_REPO_DIR/contrib/sshd_config" /etc/ssh/sshd_config \
-		|| die "Could not install /etc/ssh/sshd_config"
 	enable_service sshd
 }
 
@@ -133,185 +140,26 @@ function install_authorized_keys() {
 	fi
 }
 
-function generate_initramfs() {
-	local output="$1"
-
-	# Generate initramfs
-	einfo "Generating initramfs"
-
-	local modules=()
-	[[ $USED_RAID == "true" ]] \
-		&& modules+=("mdraid")
-	[[ $USED_LUKS == "true" ]] \
-		&& modules+=("crypt crypt-gpg")
-	[[ $USED_BTRFS == "true" ]] \
-		&& modules+=("btrfs")
-	[[ $USED_ZFS == "true" ]] \
-		&& modules+=("zfs")
-
-	local kver
-	kver="$(readlink /usr/src/linux)" \
-		|| die "Could not figure out kernel version from /usr/src/linux symlink."
-	kver="${kver#linux-}"
-
-	dracut_opts=()
-	if [[ $SYSTEMD == "true" && $SYSTEMD_INITRAMFS_SSHD == "true" ]]; then
-		cd /tmp || die "Could not change into /tmp"
-		try git clone https://github.com/gsauthof/dracut-sshd
-		try cp -r dracut-sshd/46sshd /usr/lib/dracut/modules.d
-		sed -e 's/^Type=notify/Type=simple/' \
-			-e 's@^\(ExecStart=/usr/sbin/sshd\) -D@\1 -e -D@' \
-			-i /usr/lib/dracut/modules.d/46sshd/sshd.service \
-			|| die "Could not replace sshd options in service file"
-		dracut_opts+=("--install" "/etc/systemd/network/20-wired.network")
-		modules+=("systemd-networkd")
-	fi
-
-	# Generate initramfs
-	# TODO --conf          "/dev/null" \
-	# TODO --confdir       "/dev/null" \
-	try dracut \
-		--kver          "$kver" \
-		--zstd \
-		--no-hostonly \
-		--ro-mnt \
-		--add           "bash ${modules[*]}" \
-		"${dracut_opts[@]}" \
-		--force \
-		"$output"
-
-	# Create script to repeat initramfs generation
-	cat > "$(dirname "$output")/generate_initramfs.sh" <<EOF
-#!/bin/bash
-kver="\$1"
-output="\$2" # At setup time, this was "$output"
-[[ -n "\$kver" ]] || { echo "usage \$0 <kernel_version> <output>" >&2; exit 1; }
-dracut \\
-	--kver          "\$kver" \\
-	--zstd \\
-	--no-hostonly \\
-	--ro-mnt \\
-	--add           "bash ${modules[*]}" \\
-	${dracut_opts[@]@Q} \\
-	--force \\
-	"\$output"
-EOF
-}
-
-function get_cmdline() {
-	local cmdline=("rd.vconsole.keymap=$KEYMAP_INITRAMFS")
-	cmdline+=("${DISK_DRACUT_CMDLINE[@]}")
-
-	if [[ $USED_ZFS != "true" ]]; then
-		cmdline+=("root=UUID=$(get_blkid_uuid_for_id "$DISK_ID_ROOT")")
-	fi
-
-	echo -n "${cmdline[*]}"
-}
-
-function install_kernel_efi() {
-	try emerge --verbose sys-boot/efibootmgr
-
-	# Copy kernel to EFI
-	local kernel_file
-	kernel_file="$(find "/boot" \( -name "vmlinuz-*" -or -name 'kernel-*' \) -printf '%f\n' | sort -V | tail -n 1)" \
-		|| die "Could not list newest kernel file"
-
-	try cp "/boot/$kernel_file" "/boot/efi/vmlinuz.efi"
-
-	# Generate initramfs
-	generate_initramfs "/boot/efi/initramfs.img"
-
-	# Create boot entry
-	einfo "Creating efi boot entry"
-	local efipartdev
-	efipartdev="$(resolve_device_by_id "$DISK_ID_EFI")" \
-		|| die "Could not resolve device with id=$DISK_ID_EFI"
-	efipartdev="$(realpath "$efipartdev")" \
-		|| die "Error in realpath '$efipartdev'"
-	local sys_efipart
-	sys_efipart="/sys/class/block/$(basename "$efipartdev")" \
-		|| die "Could not construct /sys path to efi partition"
-	local efipartnum
-	efipartnum="$(cat "$sys_efipart/partition")" \
-		|| die "Failed to find partition number for EFI partition $efipartdev"
-	local gptdev
-	gptdev="/dev/$(basename "$(readlink -f "$sys_efipart/..")")" \
-		|| die "Failed to find parent device for EFI partition $efipartdev"
-	if [[ ! -e "$gptdev" ]] || [[ -z "$gptdev" ]]; then
-		gptdev="$(resolve_device_by_id "${DISK_ID_PART_TO_GPT_ID[$DISK_ID_EFI]}")" \
-			|| die "Could not resolve device with id=${DISK_ID_PART_TO_GPT_ID[$DISK_ID_EFI]}"
-	fi
-	try efibootmgr --verbose --create --disk "$gptdev" --part "$efipartnum" --label "gentoo" --loader '\vmlinuz.efi' --unicode 'initrd=\initramfs.img'" $(get_cmdline)"
-
-	# Create script to repeat adding efibootmgr entry
-	cat > "/boot/efi/efibootmgr_add_entry.sh" <<EOF
-#!/bin/bash
-# This is the command that was used to create the efibootmgr entry when the
-# system was installed using gentoo-install.
-efibootmgr --verbose --create --disk "$gptdev" --part "$efipartnum" --label "gentoo" --loader '\\vmlinuz.efi' --unicode 'initrd=\\initramfs.img'" $(get_cmdline)"
-EOF
-}
-
-function generate_syslinux_cfg() {
-	cat <<EOF
-DEFAULT gentoo
-PROMPT 0
-TIMEOUT 0
-
-LABEL gentoo
-	LINUX ../vmlinuz-current
-	APPEND initrd=../initramfs.img $(get_cmdline)
-EOF
-}
-
-function install_kernel_bios() {
-	try emerge --verbose sys-boot/syslinux
-
-	# Link kernel to known name
-	local kernel_file
-	kernel_file="$(find "/boot" \( -name "vmlinuz-*" -or -name 'kernel-*' \) -printf '%f\n' | sort -V | tail -n 1)" \
-		|| die "Could not list newest kernel file"
-
-	try cp "/boot/$kernel_file" "/boot/bios/vmlinuz-current"
-
-	# Generate initramfs
-	generate_initramfs "/boot/bios/initramfs.img"
-
-	# Install syslinux
-	einfo "Installing syslinux"
-	local biosdev
-	biosdev="$(resolve_device_by_id "$DISK_ID_BIOS")" \
-		|| die "Could not resolve device with id=$DISK_ID_BIOS"
-	mkdir_or_die 0700 "/boot/bios/syslinux"
-	try syslinux --directory syslinux --install "$biosdev"
-
-	# Create syslinux.cfg
-	generate_syslinux_cfg > /boot/bios/syslinux/syslinux.cfg \
-		|| die "Could save generated syslinux.cfg"
-
-	# Install syslinux MBR record
-	einfo "Copying syslinux MBR record"
-	local gptdev
-	gptdev="$(resolve_device_by_id "${DISK_ID_PART_TO_GPT_ID[$DISK_ID_BIOS]}")" \
-		|| die "Could not resolve device with id=${DISK_ID_PART_TO_GPT_ID[$DISK_ID_BIOS]}"
-	try dd bs=440 conv=notrunc count=1 if=/usr/share/syslinux/gptmbr.bin of="$gptdev"
-}
-
 function install_kernel() {
-	# Install vanilla kernel
-	einfo "Installing vanilla kernel and related tools"
+	# Install kernel
+	einfo "Installing kernel and related tools"
+	try emerge --verbose sys-kernel/linux-firmware sys-firmware/intel-microcode sys-boot/efibootmgr \
+		sys-kernel/gentoo-kernel-bin sys-kernel/dracut sys-kernel/installkernel sys-boot/uefi-mkconfig
+}
 
-	if [[ $IS_EFI == "true" ]]; then
-		install_kernel_efi
-	else
-		install_kernel_bios
-	fi
+function install_sys_packages() {
+	einfo "Installing standard sys packages"
+	try emerge --verbose -- app-admin/doas app-admin/sysklogd app-misc/tmux app-portage/gentoolkit app-shells/bash-completion net-misc/chrony net-misc/netifrc sys-apps/etckeeper sys-apps/mlocate sys-apps/ripgrep sys-block/io-scheduler-udev-rules sys-fs/dosfstools sys-process/cronie net-misc/dhcpcd
 
-	einfo "Installing linux-firmware"
-	echo "sys-kernel/linux-firmware linux-fw-redistributable no-source-code" >> /etc/portage/package.license \
-		|| die "Could not write to /etc/portage/package.license"
-	try emerge --verbose linux-firmware
+	einfo "Enabling standard services"
+	enable_service chronyd default
+	enable_service cronie default
+	enable_service sysklogd default
+}
+
+function install_my_packages() {
+	einfo "Installing my packages"
+	#try emerge --verbose -- app-backup/borgbackup app-backup/restic app-editors/helix 
 }
 
 function add_fstab_entry() {
@@ -323,16 +171,12 @@ function generate_fstab() {
 	einfo "Generating fstab"
 	install -m0644 -o root -g root "$GENTOO_INSTALL_REPO_DIR/contrib/fstab" /etc/fstab \
 		|| die "Could not overwrite /etc/fstab"
-	if [[ $USED_ZFS != "true" && -n $DISK_ID_ROOT_TYPE ]]; then
-		add_fstab_entry "UUID=$(get_blkid_uuid_for_id "$DISK_ID_ROOT")" "/" "$DISK_ID_ROOT_TYPE" "$DISK_ID_ROOT_MOUNT_OPTS" "0 1"
-	fi
-	if [[ $IS_EFI == "true" ]]; then
-		add_fstab_entry "UUID=$(get_blkid_uuid_for_id "$DISK_ID_EFI")" "/boot/efi" "vfat" "defaults,noatime,fmask=0177,dmask=0077,noexec,nodev,nosuid,discard" "0 2"
-	else
-		add_fstab_entry "UUID=$(get_blkid_uuid_for_id "$DISK_ID_BIOS")" "/boot/bios" "vfat" "defaults,noatime,fmask=0177,dmask=0077,noexec,nodev,nosuid,discard" "0 2"
-	fi
+
+	# EFI System Partition
+	add_fstab_entry "UUID=$(get_blkid_uuid_for_id "$DISK_ID_EFI")" "/efi" "vfat" "umask=0077" "0 2"
+
 	if [[ -v "DISK_ID_SWAP" ]]; then
-		add_fstab_entry "UUID=$(get_blkid_uuid_for_id "$DISK_ID_SWAP")" "none" "swap" "defaults,discard" "0 0"
+		add_fstab_entry "UUID=$(get_blkid_uuid_for_id "$DISK_ID_SWAP")" "none" "swap" "sw" "0 0"
 	fi
 }
 
@@ -347,16 +191,19 @@ function main_install_gentoo_in_chroot() {
 	passwd -d root \
 		|| die "Could not change root password"
 
-	if [[ $IS_EFI == "true" ]]; then
-		# Mount efi partition
-		mount_efivars
-		einfo "Mounting efi partition"
-		mount_by_id "$DISK_ID_EFI" "/boot/efi"
-	else
-		# Mount bios partition
-		einfo "Mounting bios partition"
-		mount_by_id "$DISK_ID_BIOS" "/boot/bios"
-	fi
+	# Mount efi partition
+	einfo "Creating EFI directory"
+	mkdir_or_die 0700 "/efi"
+
+	einfo "Mounting efi partition"
+	mount_by_id "$DISK_ID_EFI" "/efi"
+
+	# Create efi vendor directories
+	einfo "Creating vendor directories"
+	mkdir_or_die 0700 "/efi/EFI/Gentoo"
+
+	einfo "Mounting efi vars"
+	mount_efivars
 
 	# Sync portage
 	einfo "Syncing portage tree"
@@ -372,29 +219,17 @@ function main_install_gentoo_in_chroot() {
 	configure_portage
 
 	# Install git (for git portage overlays)
-	einfo "Installing git"
-	try emerge --verbose dev-vcs/git
+	einfo "Installing git and eselect-repository"
+	try emerge --verbose dev-vcs/git app-eselect/eselect-repository 
 
 	if [[ "$PORTAGE_SYNC_TYPE" == "git" ]]; then
-		mkdir_or_die 0755 "/etc/portage/repos.conf"
-		cat > /etc/portage/repos.conf/gentoo.conf <<EOF
-[DEFAULT]
-main-repo = gentoo
-
-[gentoo]
-location = /var/db/repos/gentoo
-sync-type = git
-sync-uri = $PORTAGE_GIT_MIRROR
-auto-sync = yes
-sync-depth = $([[ $PORTAGE_GIT_FULL_HISTORY == true ]] && echo -n 0 || echo -n 1)
-sync-git-verify-commit-signature = yes
-sync-openpgp-key-path = /usr/share/openpgp-keys/gentoo-release.asc
-EOF
-		chmod 644 /etc/portage/repos.conf/gentoo.conf \
-			|| die "Could not change permissions of '/etc/portage/repos.conf/gentoo.conf'"
+		# https://wiki.gentoo.org/wiki/Portage_with_Git
+		try eselect repository disable gentoo
+		try eselect repository enable gentoo
 		rm -rf /var/db/repos/gentoo \
 			|| die "Could not delete obsolete rsync gentoo repository"
-		try emerge --sync
+		try emaint sync -r gentoo
+		try emaint sync -r gentoo
 	fi
 	maybe_exec 'after_configure_portage'
 
@@ -404,109 +239,48 @@ EOF
 	# Install authorized_keys before dracut, which might need them for remote unlocking.
 	install_authorized_keys
 
-	einfo "Enabling dracut USE flag on sys-kernel/installkernel"
-	echo "sys-kernel/installkernel dracut" > /etc/portage/package.use/installkernel \
-		|| die "Could not write /etc/portage/package.use/installkernel"
-
-	# Install required programs and kernel now, in order to
-	# prevent emerging module before an imminent kernel upgrade
-	try emerge --verbose sys-kernel/dracut sys-kernel/gentoo-kernel-bin app-arch/zstd
-
-	# Install mdadm if we used raid (needed for uuid resolving)
-	if [[ $USED_RAID == "true" ]]; then
-		einfo "Installing mdadm"
-		try emerge --verbose sys-fs/mdadm
-	fi
-
-	# Install cryptsetup if we used luks
-	if [[ $USED_LUKS == "true" ]]; then
-		einfo "Installing cryptsetup"
-		try emerge --verbose sys-fs/cryptsetup
-	fi
-
-	if [[ $SYSTEMD == "true" && $USED_LUKS == "true" ]] ; then
-		einfo "Enabling cryptsetup USE flag on sys-apps/systemd"
-		echo "sys-apps/systemd cryptsetup" > /etc/portage/package.use/systemd \
-			|| die "Could not write /etc/portage/package.use/systemd"
-		einfo "Rebuilding systemd with changed USE flag"
-		try emerge --verbose --changed-use --oneshot sys-apps/systemd
-	fi
-
-	# Install btrfs-progs if we used btrfs
-	if [[ $USED_BTRFS == "true" ]]; then
-		einfo "Installing btrfs-progs"
-		try emerge --verbose sys-fs/btrfs-progs
-	fi
-
-	try emerge --verbose dev-vcs/git
-
-	# Install zfs kernel module and tools if we used zfs
-	if [[ $USED_ZFS == "true" ]]; then
-		einfo "Installing zfs"
-		try emerge --verbose sys-fs/zfs sys-fs/zfs-kmod
-
-		einfo "Enabling zfs services"
-		if [[ $SYSTEMD == "true" ]]; then
-			try systemctl enable zfs.target
-			try systemctl enable zfs-import-cache
-			try systemctl enable zfs-mount
-			try systemctl enable zfs-import.target
-		else
-			try rc-update add zfs-import boot
-			try rc-update add zfs-mount boot
-		fi
-	fi
+	# Generate a valid fstab file
+	generate_fstab
 
 	# Install kernel and initramfs
 	maybe_exec 'before_install_kernel'
 	install_kernel
 	maybe_exec 'after_install_kernel'
 
-	# Generate a valid fstab file
-	generate_fstab
+	# Install standard system packages
+	install_sys_packages
 
-	# Install gentoolkit
-	einfo "Installing gentoolkit"
-	try emerge --verbose app-portage/gentoolkit
+	# Install zfs kernel module and tools if we used zfs
+	einfo "Installing zfs"
+	try emerge --verbose sys-fs/zfs sys-fs/zfs-kmod
 
-	if [[ $SYSTEMD == "true" ]]; then
-		if [[ $SYSTEMD_NETWORKD == "true" ]]; then
-			# Enable systemd networking and dhcp
-			enable_service systemd-networkd
-			enable_service systemd-resolved
-			if [[ $SYSTEMD_NETWORKD_DHCP == "true" ]]; then
-				echo -en "[Match]\nName=${SYSTEMD_NETWORKD_INTERFACE_NAME}\n\n[Network]\nDHCP=yes" > /etc/systemd/network/20-wired.network \
-					|| die "Could not write dhcp network config to '/etc/systemd/network/20-wired.network'"
-			else
-				addresses=""
-				for addr in "${SYSTEMD_NETWORKD_ADDRESSES[@]}"; do
-					addresses="${addresses}Address=$addr\n"
-				done
-				echo -en "[Match]\nName=${SYSTEMD_NETWORKD_INTERFACE_NAME}\n\n[Network]\n${addresses}Gateway=$SYSTEMD_NETWORKD_GATEWAY" > /etc/systemd/network/20-wired.network \
-					|| die "Could not write dhcp network config to '/etc/systemd/network/20-wired.network'"
-			fi
-			chown root:systemd-network /etc/systemd/network/20-wired.network \
-				|| die "Could not change owner of '/etc/systemd/network/20-wired.network'"
-			chmod 640 /etc/systemd/network/20-wired.network \
-				|| die "Could not change permissions of '/etc/systemd/network/20-wired.network'"
-		fi
-	else
-		# Install and enable dhcpcd
-		einfo "Installing dhcpcd"
-		try emerge --verbose net-misc/dhcpcd
+	einfo "Enabling zfs services"
+	try rc-update add zfs-import boot
+	try rc-update add zfs-mount boot
+	try zgenhostid
 
-		enable_service dhcpcd
-	fi
+	einfo "Reconfiguring kernel for zfs"
+	try emerge --config sys-kernel/gentoo-kernel-bin
+
+	einfo "Removing incorrect old entries"
+	try rm -f /efi/EFI/Gentoo/*.old
+	try rm -f /efi/EFI/gentoo/vmlinuz-*-old.efi
+
+	einfo "Running uefi-mkconfig"
+	try uefi-mkconfig
 
 	if [[ $ENABLE_SSHD == "true" ]]; then
 		enable_sshd
 	fi
 
+	# Install my standard set of packages
+	install_my_packages
+
 	# Install additional packages, if any.
 	if [[ ${#ADDITIONAL_PACKAGES[@]} -gt 0 ]]; then
 		einfo "Installing additional packages"
 		# shellcheck disable=SC2086
-		try emerge --verbose --autounmask-continue=y -- "${ADDITIONAL_PACKAGES[@]}"
+		try emerge --verbose -- "${ADDITIONAL_PACKAGES[@]}"
 	fi
 
 	if ask "Do you want to assign a root password now?"; then
@@ -528,9 +302,14 @@ EOF
 
 	maybe_exec 'after_install'
 
+	# Upgrade and make sure use flags are correct
+	einfo "Emerging -avuDN @world"
+	try emerge -avuDN @world
+
+	einfo "emerge --depclean"
+	try emerge --depclean
+
 	einfo "Gentoo installation complete."
-	[[ $USED_LUKS == "true" ]] \
-		&& einfo "A backup of your luks headers can be found at '$LUKS_HEADER_BACKUP_DIR', in case you want to have a backup."
 	einfo "You may now reboot your system or execute ./install --chroot $ROOT_MOUNTPOINT to enter your system in a chroot."
 	einfo "Chrooting in this way is always possible in case you need to fix something after rebooting."
 }
@@ -541,8 +320,7 @@ function main_install() {
 	gentoo_umount
 	install_stage3
 
-	[[ $IS_EFI == "true" ]] \
-		&& mount_efivars
+	mount_efivars
 	gentoo_chroot "$ROOT_MOUNTPOINT" "$GENTOO_INSTALL_REPO_BIND/install" __install_gentoo_in_chroot
 }
 

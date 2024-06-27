@@ -7,7 +7,7 @@ source "$GENTOO_INSTALL_REPO_DIR/scripts/protection.sh" || exit 1
 
 function sync_time() {
 	einfo "Syncing time"
-	try ntpd -g -q
+	try chronyd -q
 
 	einfo "Current date: $(LANG=C date)"
 	einfo "Writing time to hardware clock"
@@ -34,31 +34,18 @@ function check_config() {
 
 	[[ -v "DISK_ID_ROOT" && -n $DISK_ID_ROOT ]] \
 		|| die "You must assign DISK_ID_ROOT"
-	[[ -v "DISK_ID_EFI" && -n $DISK_ID_EFI ]] || [[ -v "DISK_ID_BIOS" && -n $DISK_ID_BIOS ]] \
-		|| die "You must assign DISK_ID_EFI or DISK_ID_BIOS"
+	[[ -v "DISK_ID_EFI" && -n $DISK_ID_EFI ]]	|| die "You must assign DISK_ID_EFI"
 
-	[[ -v "DISK_ID_BIOS" ]] && [[ ! -v "DISK_ID_TO_UUID[$DISK_ID_BIOS]" ]] \
-		&& die "Missing uuid for DISK_ID_BIOS, have you made sure it is used?"
 	[[ -v "DISK_ID_EFI" ]] && [[ ! -v "DISK_ID_TO_UUID[$DISK_ID_EFI]" ]] \
 		&& die "Missing uuid for DISK_ID_EFI, have you made sure it is used?"
 	[[ -v "DISK_ID_SWAP" ]] && [[ ! -v "DISK_ID_TO_UUID[$DISK_ID_SWAP]" ]] \
 		&& die "Missing uuid for DISK_ID_SWAP, have you made sure it is used?"
 	[[ -v "DISK_ID_ROOT" ]] && [[ ! -v "DISK_ID_TO_UUID[$DISK_ID_ROOT]" ]] \
 		&& die "Missing uuid for DISK_ID_ROOT, have you made sure it is used?"
-
-	if [[ -v "DISK_ID_EFI" ]]; then
-		IS_EFI=true
-	else
-		IS_EFI=false
-	fi
 }
 
 function preprocess_config() {
 	disk_configuration
-
-	# Check encryption key if used
-	[[ $USED_ENCRYPTION == "true" ]] \
-		&& check_encryption_key
 
 	check_config
 }
@@ -70,9 +57,9 @@ function prepare_installation_environment() {
 
 	local wanted_programs=(
 		gpg
+		"?chrony"
 		hwclock
 		lsblk
-		ntpd
 		partprobe
 		python3
 		"?rhash"
@@ -80,16 +67,8 @@ function prepare_installation_environment() {
 		sgdisk
 		uuidgen
 		wget
+		zfs
 	)
-
-	[[ $USED_BTRFS == "true" ]] \
-		&& wanted_programs+=(btrfs)
-	[[ $USED_ZFS == "true" ]] \
-		&& wanted_programs+=(zfs)
-	[[ $USED_RAID == "true" ]] \
-		&& wanted_programs+=(mdadm)
-	[[ $USED_LUKS == "true" ]] \
-		&& wanted_programs+=(cryptsetup)
 
 	# Check for existence of required programs
 	check_wanted_programs "${wanted_programs[@]}"
@@ -145,7 +124,6 @@ function add_summary_entry() {
 
 	local ptr
 	case "$id" in
-		"${DISK_ID_BIOS-__unused__}")  ptr="[1;32m← bios[m" ;;
 		"${DISK_ID_EFI-__unused__}")   ptr="[1;32m← efi[m"  ;;
 		"${DISK_ID_SWAP-__unused__}")  ptr="[1;34m← swap[m" ;;
 		"${DISK_ID_ROOT-__unused__}")  ptr="[1;33m← root[m" ;;
@@ -229,11 +207,8 @@ function disk_create_partition() {
 	local partuuid="${DISK_ID_TO_UUID[$new_id]}"
 	local extra_args=""
 	case "$type" in
-		'bios')  type='ef02' extra_args='--attributes=0:set:2';;
 		'efi')   type='ef00' ;;
 		'swap')  type='8200' ;;
-		'raid')  type='fd00' ;;
-		'luks')  type='8309' ;;
 		'linux') type='8300' ;;
 		*) ;;
 	esac
@@ -257,112 +232,6 @@ function disk_create_partition() {
 	done
 }
 
-function disk_create_raid() {
-	local new_id="${arguments[new_id]}"
-	local level="${arguments[level]}"
-	local name="${arguments[name]}"
-	local ids="${arguments[ids]}"
-	if [[ ${disk_action_summarize_only-false} == "true" ]]; then
-		local id
-		# Splitting is intentional here
-		# shellcheck disable=SC2086
-		for id in ${ids//';'/ }; do
-			add_summary_entry "$id" "_$new_id" "raid$level" "" "$(summary_color_args name)"
-		done
-
-		add_summary_entry __root__ "$new_id" "raid$level" "" "$(summary_color_args name)"
-		return 0
-	fi
-
-	local devices_desc=""
-	local devices=()
-	local id
-	local dev
-	# Splitting is intentional here
-	# shellcheck disable=SC2086
-	for id in ${ids//';'/ }; do
-		dev="$(resolve_device_by_id "$id")" \
-			|| die "Could not resolve device with id=$id"
-		devices+=("$dev")
-		devices_desc+="$dev ($id), "
-	done
-	devices_desc="${devices_desc:0:-2}"
-
-	local mddevice="/dev/md/$name"
-	local uuid="${DISK_ID_TO_UUID[$new_id]}"
-
-	extra_args=()
-	if [[ ${level} == 1 ]]; then
-		extra_args+=("--metadata=1.0")
-	else
-		extra_args+=("--metadata=1.2")
-	fi
-
-	einfo "Creating raid$level ($new_id) on $devices_desc"
-	mdadm \
-			--create "$mddevice" \
-			--verbose \
-			--homehost="$HOSTNAME" \
-			"${extra_args[@]}" \
-			--raid-devices="${#devices[@]}" \
-			--uuid="$uuid" \
-			--level="$level" \
-			"${devices[@]}" \
-		|| die "Could not create raid$level array '$mddevice' ($new_id) on $devices_desc"
-}
-
-function disk_create_luks() {
-	local new_id="${arguments[new_id]}"
-	local name="${arguments[name]}"
-	if [[ ${disk_action_summarize_only-false} == "true" ]]; then
-		if [[ -v arguments[id] ]]; then
-			add_summary_entry "${arguments[id]}" "$new_id" "luks" "" ""
-		else
-			add_summary_entry __root__ "$new_id" "${arguments[device]}" "(luks)" ""
-		fi
-		return 0
-	fi
-
-	local device
-	local device_desc=""
-	if [[ -v arguments[id] ]]; then
-		device="$(resolve_device_by_id "${arguments[id]}")"
-		device_desc="$device ($id)"
-	else
-		device="${arguments[device]}"
-		device_desc="$device"
-	fi
-
-	local uuid="${DISK_ID_TO_UUID[$new_id]}"
-
-	einfo "Creating luks ($new_id) on $device_desc"
-	cryptsetup luksFormat \
-			--type luks2 \
-			--uuid "$uuid" \
-			--key-file <(echo -n "$GENTOO_INSTALL_ENCRYPTION_KEY") \
-			--cipher aes-xts-plain64 \
-			--hash sha512 \
-			--pbkdf argon2id \
-			--iter-time 4000 \
-			--key-size 512 \
-			--batch-mode \
-			"$device" \
-		|| die "Could not create luks on $device_desc"
-	mkdir -p "$LUKS_HEADER_BACKUP_DIR" \
-		|| die "Could not create luks header backup dir '$LUKS_HEADER_BACKUP_DIR'"
-	local header_file="$LUKS_HEADER_BACKUP_DIR/luks-header-$id-${uuid,,}.img"
-	[[ ! -e $header_file ]] \
-		|| rm "$header_file" \
-		|| die "Could not remove old luks header backup file '$header_file'"
-	cryptsetup luksHeaderBackup "$device" \
-			--header-backup-file "$header_file" \
-		|| die "Could not backup luks header on $device_desc"
-	cryptsetup open --type luks2 \
-			--key-file <(echo -n "$GENTOO_INSTALL_ENCRYPTION_KEY") \
-			"$device" "$name" \
-		|| die "Could not open luks encrypted device $device_desc"
-}
-
 function disk_create_dummy() {
 	local new_id="${arguments[new_id]}"
 	local device="${arguments[device]}"
@@ -370,21 +239,6 @@ function disk_create_dummy() {
 		add_summary_entry __root__ "$new_id" "$device" "" ""
 		return 0
 	fi
-}
-
-function init_btrfs() {
-	local device="$1"
-	local desc="$2"
-	mkdir -p /btrfs \
-		|| die "Could not create /btrfs directory"
-	mount "$device" /btrfs \
-		|| die "Could not mount $desc to /btrfs"
-	btrfs subvolume create /btrfs/root \
-		|| die "Could not create btrfs subvolume /root on $desc"
-	btrfs subvolume set-default /btrfs/root \
-		|| die "Could not set default btrfs subvolume to /root on $desc"
-	umount /btrfs \
-		|| die "Could not unmount btrfs on $desc"
 }
 
 function disk_format() {
@@ -426,26 +280,6 @@ function disk_format() {
 			# Try to swapoff in case the system enabled swap automatically
 			swapoff "$device" &>/dev/null
 			;;
-		'ext4')
-			if [[ -v "arguments[label]" ]]; then
-				mkfs.ext4 -q -L "$label" "$device" \
-					|| die "Could not format device '$device' ($id)"
-			else
-				mkfs.ext4 -q "$device" \
-					|| die "Could not format device '$device' ($id)"
-			fi
-			;;
-		'btrfs')
-			if [[ -v "arguments[label]" ]]; then
-				mkfs.btrfs -q -L "$label" "$device" \
-					|| die "Could not format device '$device' ($id)"
-			else
-				mkfs.btrfs -q "$device" \
-					|| die "Could not format device '$device' ($id)"
-			fi
-
-			init_btrfs "$device" "'$device' ($id)"
-			;;
 		*) die "Unknown filesystem type" ;;
 	esac
 }
@@ -464,17 +298,7 @@ function format_zfs_standard() {
 	local extra_args=()
 
 	einfo "Creating zfs pool on $devices_desc"
-
 	local zfs_stdin=""
-	if [[ "$encrypt" == true ]]; then
-		extra_args+=(
-			"-O" "encryption=aes-256-gcm"
-			"-O" "keyformat=passphrase"
-			"-O" "keylocation=prompt"
-			)
-
-		zfs_stdin="$GENTOO_INSTALL_ENCRYPTION_KEY"
-	fi
 
 	# dnodesize=legacy might be needed for GRUB2, but auto is preferred for xattr=sa.
 	zpool create \
@@ -544,54 +368,6 @@ function disk_format_zfs() {
 	fi
 }
 
-function disk_format_btrfs() {
-	local ids="${arguments[ids]}"
-	local label="${arguments[label]}"
-	local raid_type="${arguments[raid_type]}"
-	if [[ ${disk_action_summarize_only-false} == "true" ]]; then
-		local id
-		# Splitting is intentional here
-		# shellcheck disable=SC2086
-		for id in ${ids//';'/ }; do
-			add_summary_entry "$id" "__fs__$id" "btrfs" "(fs)" "$(summary_color_args label)"
-		done
-		return 0
-	fi
-
-	local devices_desc=""
-	local devices=()
-	local id
-	local dev
-	# Splitting is intentional here
-	# shellcheck disable=SC2086
-	for id in ${ids//';'/ }; do
-		dev="$(resolve_device_by_id "$id")" \
-			|| die "Could not resolve device with id=$id"
-		devices+=("$dev")
-		devices_desc+="$dev ($id), "
-	done
-	devices_desc="${devices_desc:0:-2}"
-
-	wipefs --quiet --all --force "${devices[@]}" \
-		|| die "Could not erase previous file system signatures from $devices_desc"
-
-	# Collect extra arguments
-	extra_args=()
-	if [[ "${#devices}" -gt 1 ]] && [[ -v "arguments[raid_type]" ]]; then
-		extra_args+=("-d" "$raid_type")
-	fi
-
-	if [[ -v "arguments[label]" ]]; then
-		extra_args+=("-L" "$label")
-	fi
-
-	einfo "Creating btrfs on $devices_desc"
-	mkfs.btrfs -q "${extra_args[@]}" "${devices[@]}" \
-		|| die "Could not create btrfs on $devices_desc"
-
-	init_btrfs "${devices[0]}" "btrfs array ($devices_desc)"
-}
-
 function apply_disk_action() {
 	unset known_arguments
 	unset arguments; declare -A arguments; parse_arguments "$@"
@@ -599,12 +375,9 @@ function apply_disk_action() {
 		'existing')          disk_existing         ;;
 		'create_gpt')        disk_create_gpt       ;;
 		'create_partition')  disk_create_partition ;;
-		'create_raid')       disk_create_raid      ;;
-		'create_luks')       disk_create_luks      ;;
 		'create_dummy')      disk_create_dummy     ;;
 		'format')            disk_format           ;;
 		'format_zfs')        disk_format_zfs       ;;
-		'format_btrfs')      disk_format_btrfs     ;;
 		*) echo "Ignoring invalid action: ${arguments[action]}" ;;
 	esac
 }
@@ -732,16 +505,11 @@ function summarize_disk_actions() {
 function apply_disk_configuration() {
 	summarize_disk_actions
 
-	if [[ $NO_PARTITIONING_OR_FORMATTING == true ]]; then
-		elog "You have chosen an existing disk configuration. No devices will"
-		elog "actually be re-partitioned or formatted. Please make sure that all"
-		elog "devices are already formatted."
-	else
-		ewarn "Please ensure that all selected devices are fully unmounted and are"
-		ewarn "not otherwise in use by the system. This includes stopping mdadm arrays"
-		ewarn "and closing opened luks volumes if applicable for all relevant devices."
-		ewarn "Otherwise, automatic partitioning may fail."
-	fi
+	ewarn "Please ensure that all selected devices are fully unmounted and are"
+	ewarn "not otherwise in use by the system. This includes stopping mdadm arrays"
+	ewarn "and closing opened luks volumes if applicable for all relevant devices."
+	ewarn "Otherwise, automatic partitioning may fail."
+
 	ask "Do you really want to apply this disk configuration?" \
 		|| die "Aborted"
 	countdown "Applying in " 5
@@ -790,10 +558,8 @@ function mount_by_id() {
 }
 
 function mount_root() {
-	if [[ $USED_ZFS == "true" ]] && ! mountpoint -q -- "$ROOT_MOUNTPOINT"; then
+	if ! mountpoint -q -- "$ROOT_MOUNTPOINT"; then
 		die "Error: Expected zfs to be mounted under '$ROOT_MOUNTPOINT', but it isn't."
-	else
-		mount_by_id "$DISK_ID_ROOT" "$ROOT_MOUNTPOINT"
 	fi
 }
 
@@ -860,7 +626,7 @@ function download_stage3() {
 		# Check hashes
 		einfo "Verifying tarball integrity"
 		# Replace any absolute paths in the digest file with just the stage3 basename, so it will be found by rhash
-		digest_line=$(grep 'tar.xz$' "${CURRENT_STAGE3}.DIGESTS" | sed -e 's/  .*stage3-/  stage3-/')
+		digest_line=$(grep 'tar.xz$' "${CURRENT_STAGE3}.DIGESTS" | sed -e 's/  .*stage3-/  stage3-/' | head -n 1)
 		if type rhash &>/dev/null; then
 			rhash -P --check <(echo "# SHA512"; echo "$digest_line") \
 				|| die "Checksum mismatch!"
@@ -991,9 +757,15 @@ function gentoo_chroot() {
 }
 
 function enable_service() {
-	if [[ $SYSTEMD == "true" ]]; then
-		try systemctl enable "$1"
-	else
-		try rc-update add "$1" default
-	fi
+	try rc-update add "$1" default
+}
+
+function after_install_umount() {
+		einfo "Unmounting chroot filesystems and killing dirmngr to export pool"
+		umount -l $GENTOO_INSTALL_REPO_BIND
+		umount -l $ROOT_MOUNTPOINT/efi
+		umount -l $ROOT_MOUNTPOINT/dev{/shm,/pts,}
+		umount -R -l "$ROOT_MOUNTPOINT"
+		umount -R $TMP_DIR
+		pkill dirmngr
 }
