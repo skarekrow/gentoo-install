@@ -109,6 +109,10 @@ EOF
 sys-firmware/intel-microcode initramfs
 EOF
 
+	cat > "/etc/portage/package.use/sysklogd" << 'EOF'
+app-admin/sysklogd logrotate
+EOF
+
 	chmod 644 /etc/portage/make.conf \
 		|| die "Could not chmod 644 /etc/portage/make.conf"
 	chmod 644 /etc/portage/bashrc \
@@ -121,6 +125,8 @@ EOF
 		|| die "Could not chmod 644 /etc/portage/package.use/linux-firmware"
 	chmod 644 /etc/portage/package.use/intel-microcode \
 		|| die "Could not chmod 644 /etc/portage/package.use/intel-microcode"
+	chmod 644 /etc/portage/package.use/sysklogd \
+		|| die "Could not chmod 644 /etc/portage/package.use/sysklogd"
 }
 
 function enable_sshd() {
