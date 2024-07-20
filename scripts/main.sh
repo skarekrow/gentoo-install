@@ -272,6 +272,9 @@ function main_install_gentoo_in_chroot() {
 	try rm -f /efi/EFI/Gentoo/*.old
 	try rm -f /efi/EFI/gentoo/vmlinuz-*-old.efi
 
+	einfo "Creating empty uefi-mkconfig config"
+	try touch /etc/default/uefi-mkconfig
+
 	einfo "Running uefi-mkconfig"
 	try uefi-mkconfig
 
