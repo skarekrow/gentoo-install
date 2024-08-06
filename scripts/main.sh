@@ -155,17 +155,144 @@ function install_kernel() {
 
 function install_sys_packages() {
 	einfo "Installing standard sys packages"
-	try emerge --verbose -- app-admin/doas app-admin/sysklogd app-misc/tmux app-portage/gentoolkit app-shells/bash-completion net-misc/chrony net-misc/netifrc sys-apps/etckeeper sys-apps/mlocate sys-apps/ripgrep sys-block/io-scheduler-udev-rules sys-fs/dosfstools sys-process/cronie net-misc/dhcpcd
+	try emerge --verbose -- app-admin/doas app-admin/sysklogd app-misc/tmux app-portage/gentoolkit app-shells/bash-completion net-misc/chrony net-misc/netifrc sys-apps/etckeeper sys-apps/mlocate sys-apps/ripgrep sys-block/io-scheduler-udev-rules sys-fs/dosfstools sys-process/cronie net-misc/dhcpcd sys-power/nut
 
 	einfo "Enabling standard services"
 	enable_service chronyd default
 	enable_service cronie default
 	enable_service sysklogd default
+	enable_service upsmon default
+
+	# NUT
+	einfo "Configuring NUT"
+	try sed 's/MODE=none/MODE=netclient/' /etc/nut/nut.conf
+	try cp -a /etc/nut/ups.conf /etc/nut/ups.conf.original
+	try cp -a /etc/nut/upsd.conf /etc/nut/upsd.conf.original
+	try cp -a /etc/nut/upsmon.conf /etc/nut/upsmon.conf.original
+	try cp -a /etc/nut/upssched.conf /etc/nut/upssched.conf.original
+	try cp -a /usr/bin/upssched-cmd /usr/bin/upssched-cmd.original
+	try rm /etc/nut/ups.conf /etc/nut/upsd.conf
+	mkdir_or_die 0770 "/var/lib/nut/upssched"
+	try chown nut:nut /var/lib/nut/upssched
+
+	cat > '/etc/nut/upsd.users' << 'EOF'
+[monuser]
+    password = mypass
+    upsmon slave
+EOF
+
+	cat > '/etc/nut/upsmon.conf' << 'EOF'
+MONITOR ups@192.168.1.254 1 monuser mypass slave
+# If you want that NUT can shutdown the computer, you need root privileges:
+RUN_AS_USER root
+
+MINSUPPLIES 1
+SHUTDOWNCMD "/sbin/shutdown -h +0"
+NOTIFYCMD /usr/sbin/upssched
+POLLFREQ 5
+POLLFREQALERT 1
+HOSTSYNC 15
+DEADTIME 15
+POWERDOWNFLAG /etc/killpower
+
+NOTIFYMSG ONLINE	"UPS %s on line power"
+NOTIFYMSG ONBATT	"UPS %s on battery"
+NOTIFYMSG LOWBATT	"UPS %s battery is low"
+NOTIFYMSG FSD		"UPS %s: forced shutdown in progress"
+NOTIFYMSG COMMOK	"Communications with UPS %s established"
+NOTIFYMSG COMMBAD	"Communications with UPS %s lost"
+NOTIFYMSG SHUTDOWN	"Auto logout and shutdown proceeding"
+NOTIFYMSG REPLBATT	"UPS %s battery needs to be replaced"
+NOTIFYMSG NOCOMM	"UPS %s is unavailable"
+NOTIFYMSG NOPARENT	"upsmon parent process died - shutdown impossible"
+
+NOTIFYFLAG ONLINE	SYSLOG+WALL+EXEC
+NOTIFYFLAG ONBATT	SYSLOG+WALL+EXEC
+NOTIFYFLAG LOWBATT	SYSLOG+WALL+EXEC
+NOTIFYFLAG FSD		SYSLOG+WALL+EXEC
+NOTIFYFLAG COMMOK	SYSLOG+WALL+EXEC
+NOTIFYFLAG COMMBAD	SYSLOG+WALL+EXEC
+NOTIFYFLAG SHUTDOWN	SYSLOG+WALL+EXEC
+NOTIFYFLAG REPLBATT	SYSLOG+WALL+EXEC
+NOTIFYFLAG NOCOMM	SYSLOG+WALL+EXEC
+NOTIFYFLAG NOPARENT	SYSLOG+WALL
+
+RBWARNTIME 43200
+
+NOCOMMWARNTIME 600
+
+FINALDELAY 5
+EOF
+
+	cat > '/etc/nut/upssched.conf' << 'EOF'
+CMDSCRIPT /usr/bin/upssched-cmd
+PIPEFN /var/lib/nut/upssched/upssched.pipe
+LOCKFN /var/lib/nut/upssched/upssched.lock
+
+AT ONBATT * START-TIMER onbatt 300
+AT ONLINE * CANCEL-TIMER onbatt online
+AT LOWBATT * EXECUTE onbatt
+AT COMMBAD * START-TIMER commbad 30
+AT COMMOK * CANCEL-TIMER commbad commok
+AT NOCOMM * EXECUTE commbad
+AT SHUTDOWN * EXECUTE powerdown
+AT REPLBATT * EXECUTE replacebatt
+EOF
+
+	cat > '/usr/bin/upssched-cmd' << 'EOF'
+#! /bin/sh
+#
+# This script should be called by upssched via the CMDSCRIPT directive.
+#
+# Here is a quick example to show how to handle a bunch of possible
+# timer names with the help of the case structure.
+#
+# This script may be replaced with another program without harm.
+#
+# The first argument passed to your CMDSCRIPT is the name of the timer
+# from your AT lines.
+
+case $1 in
+        onbatt)
+                logger -t upssched-cmd "The UPS is on battery"
+                # mail -s "The UPS is on battery" admin@example.com &
+                # For example, uncommenting, you can stop some power-hog services
+                #rc-service boinc stop
+                #rc-service xmr-stak stop
+                ;;
+        online)
+                logger -t upssched-cmd "The UPS is back on power"
+                # mail -s "The UPS is back on power" admin@example.com &
+                # For example, uncommenting, you can restart useful power-hog services
+                #rc-service boinc start
+                #rc-service xmr-stak start
+                ;;
+        commbad)
+                logger -t upssched-cmd "The server lost communication with UPS"
+                # mail -s "The server lost communication with UPS" admin@example.com &
+                ;;
+        commok)
+                logger -t upssched-cmd "The server re-establish communication with UPS"
+                # mail -s "The server re-establish communication with UPS" admin@example.com &
+                ;;
+        powerdown)
+                logger -t upssched-cmd "The UPS is shutting down the system"
+                # mail -s "The UPS is shutting down the system" admin@example.com &
+                ;;
+        replacebatt)
+                logger -t upssched-cmd "The UPS needs new battery"
+                # mail -s "The UPS needs new battery" admin@example.com &
+                ;;
+        *)
+                logger -t upssched-cmd "Unrecognized command: $1"
+                ;;
+esac
+EOF
 }
 
 function install_my_packages() {
 	einfo "Installing my packages"
-	#try emerge --verbose -- app-backup/borgbackup app-backup/restic app-editors/helix 
+	try emerge --verbose -- app-backup/borgbackup app-backup/restic app-editors/helix 
 }
 
 function add_fstab_entry() {
